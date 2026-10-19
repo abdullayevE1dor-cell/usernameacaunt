@@ -1,1 +1,2 @@
-worker: python "bot music.py"
+worker: python allbot.py
+
