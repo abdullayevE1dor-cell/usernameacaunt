@@ -1,2 +1,1 @@
-worker: python allbot.py
-
+worker: python allbot2.py
