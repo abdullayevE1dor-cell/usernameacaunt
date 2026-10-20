@@ -47,6 +47,7 @@ create table if not exists admins(uid int primary key);
 create table if not exists categories(id integer primary key autoincrement, name text);
 create table if not exists products(id integer primary key autoincrement, name text, descr text,
   price int, kind text, content text, active int default 1, cat_id int default 0);
+create table if not exists items(id integer primary key autoincrement, prod_id int, kind text, content text, pos int);
 create table if not exists sales(id text primary key, uid int, uname text, prod_id int, pm text, status text, at int);
 create table if not exists downloads(uid int, at int, ok int, site text);
 """)
@@ -129,20 +130,21 @@ def cat_name(cid):
 
 
 def main_kb(uid):
-    rows = [["Yuklash", "Mavzular"], ["Obuna", "Aloqa"]]
+    rows = [["Yuklash", "Mavzular"], ["Kutubxona", "Obuna"], ["Aloqa"]]
     if uid in admins():
         rows.append(["Admin panel"])
     return RK(rows, resize_keyboard=True)
 
 
 def admin_kb():
-    return RK([["Statistika", "E'lon yuborish"],
-               ["Mahsulot qo'shish", "Hamma mahsulotlar"],
-               ["Mavzu qo'shish", "Mavzularni boshqarish"],
-               ["Obuna tariflari", "Premium berish"],
-               ["Bloklash", "Blokdan chiqarish"],
-               ["Majburiy kanal", "Buyurtmalar"],
-               ["Adminlar", "Orqaga"]], resize_keyboard=True)
+    return RK([["Mahsulot qo'shish", "To'plam qo'shish"],
+               ["Hamma mahsulotlar", "Mavzu qo'shish"],
+               ["Mavzularni boshqarish", "Obuna tariflari"],
+               ["Premium berish", "Bloklash"],
+               ["Blokdan chiqarish", "Majburiy kanal"],
+               ["Buyurtmalar", "Statistika"],
+               ["E'lon yuborish", "Adminlar"],
+               ["Orqaga"]], resize_keyboard=True)
 
 
 # ------------------------------------------------------------------ himoya va majburiy obuna
@@ -298,32 +300,59 @@ async def run_download(q, ctx, kind, tok):
 
 
 # ------------------------------------------------------------------ do'kon (mavzular) va obuna
+def cat_buttons(bundle):
+    cond = "kind='bundle'" if bundle else "kind not in ('bundle','premium')"
+    pre = "bcat" if bundle else "cat"
+    btns = []
+    for c in db.execute("select * from categories order by id").fetchall():
+        n = db.execute(f"select count(*) from products where active=1 and cat_id=? and {cond}", (c["id"],)).fetchone()[0]
+        if n:
+            btns.append(B(f"{c['name']} ({n})", callback_data=f"{pre}:{c['id']}"))
+    n0 = db.execute(f"select count(*) from products where active=1 and cat_id=0 and {cond}").fetchone()[0]
+    if n0:
+        btns.append(B(f"Boshqa ({n0})", callback_data=f"{pre}:0"))
+    return [btns[i:i + 2] for i in range(0, len(btns), 2)]
+
+
 async def show_cats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await gate(update, ctx):
         return
-    btns = []
-    for c in db.execute("select * from categories order by id").fetchall():
-        n = db.execute("select count(*) from products where active=1 and cat_id=?", (c["id"],)).fetchone()[0]
-        if n:
-            btns.append(B(f"{c['name']} ({n})", callback_data=f"cat:{c['id']}"))
-    n0 = db.execute("select count(*) from products where active=1 and cat_id=0").fetchone()[0]
-    if n0:
-        btns.append(B(f"Boshqa ({n0})", callback_data="cat:0"))
-    if not btns:
+    kb = cat_buttons(False)
+    if not kb:
         await update.message.reply_text("Hozircha mahsulot yo'q.")
         return
-    await update.message.reply_text("Mavzuni tanlang:", reply_markup=M([btns[i:i + 2] for i in range(0, len(btns), 2)]))
+    await update.message.reply_text("Mavzuni tanlang:", reply_markup=M(kb))
 
 
-async def send_products(msg, cat_id):
-    rows = db.execute("select * from products where active=1 and cat_id=? order by id desc limit 20",
+async def show_lib(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await gate(update, ctx):
+        return
+    kb = cat_buttons(True)
+    if not kb:
+        await update.message.reply_text("Kutubxona hozircha bo'sh.")
+        return
+    await update.message.reply_text(
+        "Kutubxona: bitta tugma orqali bir nechta material (kitoblar, darsliklar, rasmlar, fayllar) olasiz.\n"
+        "Mavzuni tanlang:", reply_markup=M(kb))
+
+
+def item_count(pid):
+    return db.execute("select count(*) from items where prod_id=?", (pid,)).fetchone()[0]
+
+
+async def send_products(msg, cat_id, bundle=False):
+    cond = "kind='bundle'" if bundle else "kind not in ('bundle','premium')"
+    rows = db.execute(f"select * from products where active=1 and cat_id=? and {cond} order by id desc limit 20",
                       (cat_id,)).fetchall()
     if not rows:
-        await msg.reply_text("Bu mavzuda hozircha mahsulot yo'q.")
+        await msg.reply_text("Bu bo'limda hozircha mahsulot yo'q.")
         return
     for p in rows:
-        await msg.reply_text(f"{p['name']}\n\n{p['descr']}\n\nNarx: {money(p['price'])}",
-                             reply_markup=M([[B("Sotib olish", callback_data=f"buy:{p['id']}")]]))
+        price = "Bepul" if p["price"] == 0 else money(p["price"])
+        extra = f"\nIchida: {item_count(p['id'])} ta material" if p["kind"] == "bundle" else ""
+        btn = (B("Bepul olish", callback_data=f"free:{p['id']}") if p["price"] == 0
+               else B("Sotib olish", callback_data=f"buy:{p['id']}"))
+        await msg.reply_text(f"{p['name']}\n\n{p['descr']}{extra}\n\nNarx: {price}", reply_markup=M([[btn]]))
 
 
 async def sub_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -346,7 +375,34 @@ async def sub_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=M([[B("Sotib olish", callback_data=f"buy:{p['id']}")]]))
 
 
+async def send_item(bot, uid, kind, content):
+    if kind == "doc":
+        await bot.send_document(uid, content)
+    elif kind == "photo":
+        await bot.send_photo(uid, content)
+    elif kind == "video":
+        await bot.send_video(uid, content)
+    elif kind == "audio":
+        await bot.send_audio(uid, content)
+    else:
+        await bot.send_message(uid, content)
+
+
 async def deliver(bot, uid, p):
+    if p["kind"] == "bundle":
+        rows = db.execute("select * from items where prod_id=? order by pos, id", (p["id"],)).fetchall()
+        await bot.send_message(uid, f"{p['name']}: {len(rows)} ta material yuborilmoqda...")
+        failed = 0
+        for r in rows:
+            try:
+                await send_item(bot, uid, r["kind"], r["content"])
+            except Exception:
+                logging.exception("To'plam elementini yuborib bo'lmadi")
+                failed += 1
+            await asyncio.sleep(0.4)
+        await bot.send_message(uid, "Hammasi yuborildi. Rahmat!" if not failed else
+                               f"{len(rows) - failed} ta material yuborildi, {failed} tasini yuborib bo'lmadi. Admin bilan bog'laning.")
+        return
     if p["kind"] == "premium":
         days = int(p["content"])
         until = max(int(time.time()), premium_until(uid)) + days * 86400
@@ -365,8 +421,9 @@ async def deliver(bot, uid, p):
 
 
 def prod_card(p):
+    extra = f" · {item_count(p['id'])} ta material" if p["kind"] == "bundle" else ""
     return (f"#{p['id']} [{cat_name(p['cat_id'] if p['kind'] != 'premium' else -1)}] {p['name']} · "
-            f"{money(p['price'])} · {'sotuvda' if p['active'] else 'yashirin'}")
+            f"{'Bepul' if p['price'] == 0 else money(p['price'])}{extra} · {'sotuvda' if p['active'] else 'yashirin'}")
 
 
 def prod_kb(p):
@@ -394,6 +451,22 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif kind == "cat":
         if await gate(update, ctx):
             await send_products(q.message, int(val))
+
+    elif kind == "bcat":
+        if await gate(update, ctx):
+            await send_products(q.message, int(val), bundle=True)
+
+    elif kind == "free":
+        p = db.execute("select * from products where id=? and active=1 and price=0", (val,)).fetchone()
+        if not p:
+            await q.message.reply_text("Bu material mavjud emas.")
+            return
+        if await gate(update, ctx):
+            db.execute("insert into sales values(?,?,?,?,?,?,?)",
+                       ("F" + secrets.token_hex(3).upper(), uid, q.from_user.username or q.from_user.full_name,
+                        p["id"], "bepul", "bepul", int(time.time())))
+            db.commit()
+            await deliver(ctx.bot, uid, p)
 
     elif kind == "buy":
         p = db.execute("select * from products where id=? and active=1", (val,)).fetchone()
@@ -429,6 +502,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Mavzu: {cat_name(int(val))}\nEndi mahsulotning o'zini yuboring: fayl (PDF, ZIP va h.k.) yoki rasm, "
             "yoki matn/havola.")
 
+    elif kind == "pc" and is_adm and ud.get("state") == "b_cat":
+        ud["new"]["cat"] = int(val)
+        ud["state"] = "b_f"
+        await q.message.reply_text(
+            f"Mavzu: {cat_name(int(val))}\nEndi to'plamdagi materiallarni birin-ketin yuboring: fayllar (PDF, ZIP, APK...), "
+            "rasmlar, video, audio yoki havola/matn. Hammasini yuborib bo'lgach, \"Tayyor\" deb yozing.")
+
     elif kind == "dc" and is_adm:
         db.execute("update products set cat_id=0 where cat_id=?", (val,))
         db.execute("delete from categories where id=?", (val,))
@@ -444,6 +524,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await q.edit_message_text(prod_card(p), reply_markup=prod_kb(p))
         else:
             db.execute("delete from products where id=?", (val,))
+            db.execute("delete from items where prod_id=?", (val,))
             db.commit()
             await q.edit_message_text(f"#{val} o'chirildi.")
 
@@ -557,6 +638,11 @@ async def channel_start(update, ctx):
 
 async def wiz_start(update, ctx):
     await ask_state(update, ctx, "m_n", "Yangi mahsulot. Nomini yozing:", new={})
+
+
+async def bundle_start(update, ctx):
+    await ask_state(update, ctx, "b_n", "Yangi to'plam (kitoblar, darsliklar, rasmlar, ilova fayllari...). Nomini yozing:",
+                    new={"items": []})
 
 
 async def cat_add_start(update, ctx):
@@ -686,7 +772,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if st == "bc" and is_adm:
         await bc_prepare(update, ctx)
         return
-    if m.photo or m.document:
+    if m.photo or m.document or m.video or m.audio:
         await on_file(update, ctx)
         return
     if not m.text:
@@ -778,6 +864,38 @@ async def admin_state(update, ctx, st, t):
         db.commit()
         ud.clear()
         await m.reply_text(f"Tarif qo'shildi: Premium {d} kun, {money(int(t))}.")
+    elif st in ("b_n", "b_d", "b_p", "b_f"):
+        n = ud.setdefault("new", {"items": []})
+        if st == "b_n":
+            n["name"] = t; ud["state"] = "b_d"
+            await m.reply_text("Qisqacha tavsifini yozing:")
+        elif st == "b_d":
+            n["descr"] = t; ud["state"] = "b_p"
+            await m.reply_text("Narxi, so'mda (raqam). Bepul bo'lsa 0 yozing:")
+        elif st == "b_p":
+            if not t.isdigit():
+                await m.reply_text("Faqat raqam yozing (bepul uchun 0):")
+                return True
+            n["price"] = int(t); ud["state"] = "b_cat"
+            cats = db.execute("select * from categories order by id").fetchall()
+            btns = [B(c["name"], callback_data=f"pc:{c['id']}") for c in cats] + [B("Boshqa", callback_data="pc:0")]
+            await m.reply_text("Qaysi mavzuga qo'shamiz?", reply_markup=M([btns[i:i + 2] for i in range(0, len(btns), 2)]))
+        else:   # b_f
+            if t.lower().strip("!. ") == "tayyor":
+                items = sorted(n["items"])
+                if not items:
+                    await m.reply_text("Hali birorta material yubormadingiz. Fayl, rasm yoki havola yuboring.")
+                    return True
+                pid = db.execute("insert into products(name,descr,price,kind,content,cat_id) values(?,?,?,?,?,?)",
+                                 (n["name"], n.get("descr", ""), n["price"], "bundle", "", n.get("cat", 0))).lastrowid
+                for pos, (_, k, c) in enumerate(items):
+                    db.execute("insert into items(prod_id,kind,content,pos) values(?,?,?,?)", (pid, k, c, pos))
+                db.commit()
+                ud.clear()
+                await m.reply_text(f"To'plam qo'shildi: {n['name']} ({len(items)} ta material).")
+            else:
+                n["items"].append((m.message_id, "text", t))
+                await m.reply_text(f"Havola/matn qabul qilindi ({len(n['items'])}). Yana yuboring yoki \"Tayyor\" deb yozing.")
     elif st.startswith("m_"):
         n = ud.get("new", {})
         if st == "m_n":
@@ -810,6 +928,19 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     m = update.message
     st = ud.get("state")
     uid = update.effective_user.id
+
+    if st == "b_f" and uid in admins():
+        if m.document:
+            kind, fid = "doc", m.document.file_id
+        elif m.photo:
+            kind, fid = "photo", m.photo[-1].file_id
+        elif m.video:
+            kind, fid = "video", m.video.file_id
+        else:
+            kind, fid = "audio", m.audio.file_id
+        ud["new"]["items"].append((m.message_id, kind, fid))
+        await m.reply_text(f"Qabul qilindi ({len(ud['new']['items'])}). Yana yuboring yoki \"Tayyor\" deb yozing.")
+        return
 
     if st == "m_c" and uid in admins():
         if m.document:
@@ -847,6 +978,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Salom! Bu bot:\n"
         "- Instagram va TikTok videolaridan musiqa (mp3) yoki video yuklaydi (\"Yuklash\")\n"
         "- Turli mavzulardagi tayyor qo'llanma va shablonlarni sotadi (\"Mavzular\")\n"
+        "- Kutubxona: bitta tugma orqali bir nechta kitob, darslik va fayl beradi (\"Kutubxona\")\n"
         "- Premium obuna beradi (\"Obuna\")\n\n"
         "Materiallar umumiy ma'lumot uchun; huquqiy, moliyaviy va boshqa muhim masalalarda mutaxassis bilan "
         "maslahatlashing. Yuklangan kontentni faqat shaxsiy foydalanish uchun ishlating.",
@@ -854,10 +986,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 MENU.update({
-    "Yuklash": open_download, "Mavzular": show_cats, "Obuna": sub_menu, "Aloqa": ask_support,
+    "Yuklash": open_download, "Mavzular": show_cats, "Kutubxona": show_lib, "Obuna": sub_menu, "Aloqa": ask_support,
     "Admin panel": admin_panel, "Orqaga": back_main,
     "Statistika": admin_only(stats), "E'lon yuborish": admin_only(bc_start),
-    "Mahsulot qo'shish": admin_only(wiz_start), "Hamma mahsulotlar": admin_only(all_products),
+    "Mahsulot qo'shish": admin_only(wiz_start), "To'plam qo'shish": admin_only(bundle_start), "Hamma mahsulotlar": admin_only(all_products),
     "Mavzu qo'shish": admin_only(cat_add_start), "Mavzularni boshqarish": admin_only(cat_manage),
     "Obuna tariflari": admin_only(plans_manage), "Premium berish": admin_only(pgive_start),
     "Bloklash": admin_only(ban_start), "Blokdan chiqarish": admin_only(unban_start),
